@@ -392,7 +392,7 @@ def build_rag_graph(
         route_after_retrieve,
         {"generate": "generate", "refuse": "refuse"},
     )
-    workflow.add_edge("generate", "finali￼ze")
+    workflow.add_edge("generate", "finalize")
     workflow.add_edge("refuse", "finalize")
     workflow.add_edge("finalize", END)
 
