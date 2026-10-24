@@ -1,16 +1,24 @@
-# Local model inference
-torch>=2.2.0
-transformers>=4.45.0,<5.0.0
-accelerate>=0.34.0
+# Core validation
+pydantic>=2.7,<3.0
 
-# Embedding models
-sentence-transformers>=3.0.0
+# LangChain integrations and document processing
+langchain-core
+langchain-community
+langchain-chroma
+langchain-huggingface
+langchain-ollama
+langchain-text-splitters
 
-# LangChain components
-langchain-core>=0.3.0
-langchain-huggingface>=0.1.0
-langchain-text-splitters>=0.3.0
-langchain-chroma>=0.1.4
+# Graph orchestration
+langgraph
 
-# Persistent vector database
-chromadb>=0.5.0
+# Vector database
+chromadb
+
+# Local embeddings
+sentence-transformers
+
+# Hugging Face inference backend
+transformers
+torch
+accelerate
