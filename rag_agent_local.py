@@ -6,19 +6,20 @@ Commands:
   python3 rag_agent_local.py index   # build the vector database
   python3 rag_agent_local.py chat    # chat with the RAG graph
   python3 rag_agent_local.py graph   # print and save the graph diagram (Mermaid)
+  python3 rag_agent_local.py web     # serve the browser lab
 
 Environment variables (optional):
   DOC_PATH=./university_rules.md
   PERSIST_DIR=./chroma_db
   COLLECTION_NAME=university_rules
   EMBED_MODEL=sentence-transformers/all-MiniLM-L6-v2
-  LLM_BACKEND=huggingface            # "huggingface" or "ollama"
-  LLM_MODEL=Qwen/Qwen2.5-3B-Instruct # use "qwen2.5:3b" with the ollama backend
+  LLM_BACKEND=huggingface            # "huggingface", "ollama", or "lmstudio"
+  LLM_MODEL=Qwen/Qwen3.5-4B          # use "qwen3.5:4b" with ollama, "qwen3.5-4b" with lmstudio
   TOP_K=4
   SCORE_THRESHOLD=0.25
   CHUNK_SIZE=600
   CHUNK_OVERLAP=100
-  MAX_NEW_TOKENS=350
+  MAX_NEW_TOKENS=350                 # raised automatically for Qwen3.5 thinking models
   SHOW_STEPS=0                       # set to 1 to print each graph node as it runs
 """
 
@@ -59,9 +60,29 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "university_rules")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 LLM_BACKEND = os.getenv("LLM_BACKEND", "huggingface").strip().lower()
-DEFAULT_LLM_MODEL = "qwen2.5:3b" if LLM_BACKEND == "ollama" else "Qwen/Qwen2.5-3B-Instruct"
+DEFAULT_LLM_MODELS = {
+    "ollama": "qwen3.5:4b",
+    "lmstudio": "qwen3.5-4b",
+    "huggingface": "Qwen/Qwen3.5-4B",
+}
+DEFAULT_LLM_MODEL = DEFAULT_LLM_MODELS.get(LLM_BACKEND, "Qwen/Qwen3.5-4B")
 LLM_MODEL = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL)
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "350"))
+# Qwen3.5 thinks by default; short budgets can be spent entirely on reasoning.
+# RAG prompts often need ~1000 reasoning tokens before any visible answer.
+# Prefer LM Studio context >= 8192 when using this budget.
+QWEN35_MIN_NEW_TOKENS = int(os.getenv("QWEN35_MIN_NEW_TOKENS", "2048"))
+
+
+def is_qwen35(model: str) -> bool:
+    normalized = model.lower().replace("_", "").replace("-", "").replace("/", "").replace(":", "").replace(".", "")
+    return "qwen35" in normalized
+
+
+def generation_token_budget(model: str = LLM_MODEL, requested: int = MAX_NEW_TOKENS) -> int:
+    if is_qwen35(model):
+        return max(requested, QWEN35_MIN_NEW_TOKENS)
+    return requested
 
 TOP_K = int(os.getenv("TOP_K", "4"))
 SCORE_THRESHOLD = float(os.getenv("SCORE_THRESHOLD", "0.25"))
@@ -100,7 +121,7 @@ def load_documents(path: str) -> List[Document]:
     return [doc for doc in documents if doc.page_content.strip()]
 
 
-def split_documents(documents: List[Document]) -> List[Document]:
+def split_documents(documents: List[Document], chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHUNK_OVERLAP) -> List[Document]:
     """
     Two-stage splitting:
       1) Split by Markdown headers so each chunk stays inside one section.
@@ -111,8 +132,8 @@ def split_documents(documents: List[Document]) -> List[Document]:
         strip_headers=False,
     )
     char_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
         separators=["\n\n", "\n", ". ", " ", ""],
     )
 
@@ -135,19 +156,20 @@ def split_documents(documents: List[Document]) -> List[Document]:
 # -----------------------------
 # Models + vector store
 # -----------------------------
-def build_embeddings() -> HuggingFaceEmbeddings:
+def build_embeddings(model_name: str = EMBED_MODEL) -> HuggingFaceEmbeddings:
     # Normalized vectors + cosine distance give meaningful relevance scores (0..1)
     return HuggingFaceEmbeddings(
-        model_name=EMBED_MODEL,
+        model_name=model_name,
+        model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True},
     )
 
 
-def build_vectorstore(embeddings: HuggingFaceEmbeddings) -> Chroma:
+def build_vectorstore(embeddings: HuggingFaceEmbeddings, collection_name: str = COLLECTION_NAME, persist_dir: str = PERSIST_DIR) -> Chroma:
     return Chroma(
-        collection_name=COLLECTION_NAME,
+        collection_name=collection_name,
         embedding_function=embeddings,
-        persist_directory=PERSIST_DIR,
+        persist_directory=persist_dir,
         collection_metadata={"hnsw:space": "cosine"},
     )
 
@@ -160,44 +182,99 @@ def build_retriever(vectorstore: Chroma) -> VectorStoreRetriever:
     )
 
 
-def build_llm() -> BaseChatModel:
+def build_llm(backend: str = LLM_BACKEND, model: str = LLM_MODEL, base_url: str = "http://127.0.0.1:1234/v1") -> BaseChatModel:
     """
     Return a LangChain *chat* model. Chat models apply Qwen's chat template,
     which is essential for getting synthesized answers instead of copied text.
+
+    Qwen3.5 enables thinking by default. Backends that support it disable thinking
+    so RAG answers are not starved by reasoning tokens.
     """
-    if LLM_BACKEND == "ollama":
+    max_new_tokens = generation_token_budget(model)
+
+    if backend == "ollama":
         from langchain_ollama import ChatOllama
 
         return ChatOllama(
-            model=LLM_MODEL,
+            model=model,
             temperature=0.1,
-            num_predict=MAX_NEW_TOKENS,
+            num_predict=max_new_tokens,
             num_ctx=4096,
+            # Disable Qwen3.5 / thinking-model reasoning for direct answers.
+            reasoning=False,
         )
 
-    if LLM_BACKEND == "huggingface":
+    if backend == "huggingface":
+        from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
         from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
         from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
-        tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
-        model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL,
+        class ChatHuggingFaceNoThink(ChatHuggingFace):
+            """Apply chat templates with Qwen3.5 thinking disabled when supported."""
+
+            def _to_chat_prompt(self, messages: list[BaseMessage]) -> str:
+                if not messages:
+                    raise ValueError("At least one HumanMessage must be provided!")
+                if not isinstance(messages[-1], HumanMessage):
+                    raise ValueError("Last message must be a HumanMessage!")
+
+                messages_dicts = [self._to_chatml_format(m) for m in messages]
+                template_kwargs = {
+                    "tokenize": False,
+                    "add_generation_prompt": True,
+                    "enable_thinking": False,
+                }
+                try:
+                    return self.tokenizer.apply_chat_template(messages_dicts, **template_kwargs)
+                except TypeError:
+                    template_kwargs.pop("enable_thinking", None)
+                    return self.tokenizer.apply_chat_template(messages_dicts, **template_kwargs)
+
+            def _to_chatml_format(self, message: BaseMessage) -> dict:
+                if isinstance(message, SystemMessage):
+                    role = "system"
+                elif isinstance(message, AIMessage):
+                    role = "assistant"
+                elif isinstance(message, HumanMessage):
+                    role = "user"
+                else:
+                    raise ValueError(f"Unknown message type: {type(message)}")
+                return {"role": role, "content": message.content}
+
+        tokenizer = AutoTokenizer.from_pretrained(model)
+        hf_model = AutoModelForCausalLM.from_pretrained(
+            model,
             torch_dtype="auto",
             device_map="auto",
         )
         text_gen = pipeline(
             "text-generation",
-            model=model,
+            model=hf_model,
             tokenizer=tokenizer,
-            max_new_tokens=MAX_NEW_TOKENS,
+            max_new_tokens=max_new_tokens,
             do_sample=False,
             repetition_penalty=1.05,
             return_full_text=False,  # return only the new answer, not the prompt
         )
         hf_llm = HuggingFacePipeline(pipeline=text_gen)
-        return ChatHuggingFace(llm=hf_llm, tokenizer=tokenizer)
+        return ChatHuggingFaceNoThink(llm=hf_llm, tokenizer=tokenizer)
 
-    raise ValueError(f"Unsupported LLM_BACKEND: {LLM_BACKEND} (use 'huggingface' or 'ollama')")
+    if backend == "lmstudio":
+        from langchain_openai import ChatOpenAI
+
+        # chat_template_kwargs works on vLLM / transformers serve; LM Studio may ignore it.
+        # A larger max_tokens budget still leaves room for the final answer after thinking.
+        return ChatOpenAI(
+            model=model,
+            base_url=base_url,
+            api_key="local",
+            temperature=0.1,
+            max_tokens=max_new_tokens,
+            streaming=True,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+
+    raise ValueError(f"Unsupported LLM_BACKEND: {backend} (use huggingface, ollama, or lmstudio)")
 
 
 def vector_count(vectorstore: Chroma) -> int:
@@ -325,6 +402,8 @@ def unique_sources(docs: List[Document]) -> List[str]:
 
 
 def clean_answer(text: str) -> str:
+    # Drop Qwen3 / Qwen3.5 thinking traces if a backend left them in the answer text.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
     # Remove any sources list the model may have written on its own
     text = re.split(r"\n\s*sources?\s*:", text, maxsplit=1, flags=re.IGNORECASE)[0]
     return text.strip()
@@ -479,6 +558,7 @@ def main() -> None:
         print("  python3 rag_agent_local.py index")
         print("  python3 rag_agent_local.py chat")
         print("  python3 rag_agent_local.py graph")
+        print("  python3 rag_agent_local.py web")
         sys.exit(1)
 
     command = sys.argv[1].strip().lower()
@@ -490,9 +570,12 @@ def main() -> None:
             run_chat()
         elif command == "graph":
             run_graph()
+        elif command == "web":
+            import uvicorn
+            uvicorn.run("web_api:app", host="127.0.0.1", port=8011)
         else:
             print(f"Unknown command: {command}")
-            print("Use 'index', 'chat', or 'graph'.")
+            print("Use 'index', 'chat', 'graph', or 'web'.")
             sys.exit(1)
     except FileNotFoundError as ex:
         print(f"File error: {ex}")

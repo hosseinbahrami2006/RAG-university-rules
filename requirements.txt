@@ -10,7 +10,7 @@ langchain-ollama
 langchain-text-splitters
 
 # Graph orchestration
-langgraph
+langgraph>=1.1,<2
 
 # Vector database
 chromadb
@@ -18,7 +18,12 @@ chromadb
 # Local embeddings
 sentence-transformers
 
-# Hugging Face inference backend
-transformers
+# Hugging Face inference backend (Qwen3.5 needs a recent transformers release)
+transformers>=4.57
 torch
 accelerate
+
+# Interactive browser application
+fastapi
+uvicorn
+langchain-openai

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+chroma_db/
+web/node_modules/
+web/dist/
+*.pyc
+.vscode/
+tests/

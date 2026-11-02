@@ -14,8 +14,9 @@ The application retrieves relevant excerpts from a Markdown document and combine
 - Store embeddings in a persistent Chroma vector database.
 - Retrieve relevant chunks using similarity search with a score threshold.
 - Generate answers using either:
-  - Ollama, such as `qwen2.5:3b`.
-  - Hugging Face Transformers, such as `Qwen/Qwen2.5-3B-Instruct`.
+  - Ollama, such as `qwen3.5:4b`.
+  - Hugging Face Transformers, such as `Qwen/Qwen3.5-4B`.
+  - LM Studio's OpenAI-compatible server, such as `qwen3.5-4b`.
 - Orchestrate retrieval and generation with LangGraph.
 - Expose retrieval through a LangChain tool with a Pydantic input schema.
 - Attach document names and chunk IDs to answers.
@@ -130,7 +131,7 @@ The Markdown file is the knowledge source. Chroma is the vector database generat
 Install Ollama from https://ollama.com and download the model:
 
 ```bash
-ollama pull qwen2.5:3b
+ollama pull qwen3.5:4b
 ```
 
 Ensure Ollama is running. If necessary, start it in a separate terminal:
@@ -143,14 +144,14 @@ Configure the backend on Linux or macOS:
 
 ```bash
 export LLM_BACKEND=ollama
-export LLM_MODEL=qwen2.5:3b
+export LLM_MODEL=qwen3.5:4b
 ```
 
 On Windows PowerShell:
 
 ```powershell
 $env:LLM_BACKEND = "ollama"
-$env:LLM_MODEL = "qwen2.5:3b"
+$env:LLM_MODEL = "qwen3.5:4b"
 ```
 
 Build the index and start chatting:
@@ -172,16 +173,16 @@ python rag_agent_local.py chat
 The default model is:
 
 ```text
-Qwen/Qwen2.5-3B-Instruct
+Qwen/Qwen3.5-4B
 ```
 
-It is downloaded on first use if it is not already cached.
+It is downloaded on first use if it is not already cached. Qwen3.5 thinking mode is disabled for this backend so answers stay concise.
 
 To select this backend explicitly on Linux or macOS:
 
 ```bash
 export LLM_BACKEND=huggingface
-export LLM_MODEL=Qwen/Qwen2.5-3B-Instruct
+export LLM_MODEL=Qwen/Qwen3.5-4B
 ```
 
 ## Commands
@@ -246,13 +247,14 @@ Configuration is read from environment variables.
 | `PERSIST_DIR` | `chroma_db` beside the script | Chroma persistence directory |
 | `COLLECTION_NAME` | `university_rules` | Chroma collection name |
 | `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
-| `LLM_BACKEND` | `huggingface` | `huggingface` or `ollama` |
-| `LLM_MODEL` | Backend-dependent | Defaults to `Qwen/Qwen2.5-3B-Instruct` or `qwen2.5:3b` |
+| `LLM_BACKEND` | `huggingface` | `huggingface`, `ollama`, or `lmstudio` |
+| `LLM_MODEL` | Backend-dependent | Defaults to `Qwen/Qwen3.5-4B`, `qwen3.5:4b`, or `qwen3.5-4b` |
 | `TOP_K` | `4` | Maximum number of retrieved chunks |
 | `SCORE_THRESHOLD` | `0.25` | Minimum retrieval relevance score |
 | `CHUNK_SIZE` | `600` | Target maximum chunk size in characters |
 | `CHUNK_OVERLAP` | `100` | Chunk overlap in characters |
-| `MAX_NEW_TOKENS` | `350` | Maximum generated answer tokens |
+| `MAX_NEW_TOKENS` | `350` | Maximum generated answer tokens; Qwen3.5 uses at least 2048 |
+| `QWEN35_MIN_NEW_TOKENS` | `2048` | Minimum token budget for Qwen3.5 thinking models |
 | `SHOW_STEPS` | `0` | Set to `1` to print completed graph nodes |
 
 Environment variables must be set in the terminal before running the application. The code does not automatically load a `.env` file.
@@ -395,7 +397,7 @@ Ensure Ollama is running and the model is installed:
 
 ```bash
 ollama list
-ollama pull qwen2.5:3b
+ollama pull qwen3.5:4b
 ```
 
 ### Relevant questions return no evidence
@@ -423,3 +425,37 @@ chroma_db/
 ```
 
 Keep `university_rules.md` in the repository if you want others to reproduce the example.
+
+## Interactive browser lab
+
+The web interface makes the actual document splitting, Chroma retrieval, and LangGraph workflow inspectable. It includes streaming answers and node traces, a retrieval playground, and PCA/cosine visualizations of the indexed vectors. The regulations are fictional, and retrieved chunks are context, not claim-level verification. Conversation history is displayed in the browser but each question is independent.
+
+### Setup
+
+Use Python 3.11 or 3.12, Node.js 20+, and a running [LM Studio](https://lmstudio.ai/). Install dependencies in a virtual environment (for a CPU-only PyTorch installation, consult the PyTorch installation guide first):
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+npm install --prefix web
+npm run build --prefix web
+```
+
+The first index build downloads `sentence-transformers/all-MiniLM-L6-v2` if it is not cached. Make sure LM Studio's local server is running at `http://127.0.0.1:1234` with `qwen3.5-4b` available and loaded. Qwen3.5 thinks by default; if LM Studio exposes a Reasoning / Thinking toggle for the model, turn it off for faster RAG answers. The app raises the generation budget for Qwen3.5 to at least 2048 tokens so thinking cannot consume the entire reply. A 4096-token context is enough for typical questions; increase it only if memory allows:
+
+```bash
+lms load qwen3.5-4b -c 4096 --parallel 1 --gpu off
+python rag_agent_local.py web
+```
+
+Override the LM Studio model or URL if needed:
+
+```bash
+export LLM_MODEL=qwen3.5-4b
+export LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
+```
+
+Open http://127.0.0.1:8011. Click **Build index**; then try the example question about late registration. Select the retrieved chunks, open **Live workflow** to inspect node input/output, adjust retrieval controls in **Retrieval playground**, and load **Embedding explorer** to inspect the projection. PCA distorts distances; use the actual relevance scores to understand retrieval. A new index is built separately and becomes active only after it completes successfully. When the source or embedding model changes, rebuild it. Web and CLI indexing are separate; CLI commands continue to use the configured collection.
+
+For frontend development, run `npm run dev --prefix web`; the Vite server proxies API calls to the FastAPI server on port 8011. The production build serves all browser assets locally.
